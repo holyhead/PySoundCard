@@ -348,27 +348,37 @@ class Stream(object):
         if output_device is True:
             output_device = default_output_device()
 
-        stream_parameters_in = ffi.new("PaStreamParameters*",
-                                       ( input_device['device_index'],
-                                         input_device['input_channels'],
-                                         _np2pa[input_device['sample_format']],
-                                         input_device['input_latency'],
-                                         ffi.NULL ))
-        self.input_format = input_device['sample_format']
-        self.input_channels = stream_parameters_in.channelCount
-        if stream_parameters_in and not input_device['interleaved_data']:
-            stream_parameters_in.sampleFormat |= 0x80000000
-
-        stream_parameters_out = ffi.new("PaStreamParameters*",
-                                        ( output_device['device_index'],
-                                          output_device['output_channels'],
-                                          _np2pa[output_device['sample_format']],
-                                          output_device['output_latency'],
-                                          ffi.NULL ))
-        self.output_format = output_device['sample_format']
-        self.output_channels = stream_parameters_out.channelCount
-        if stream_parameters_out and not output_device['interleaved_data']:
-            stream_parameters_out.sampleFormat |= 0x80000000
+	# make sure behaviour is as specified in doc string: if no input_device is provided, don't create InputParameters
+        self.uses_input = False
+        stream_parameters_in = None
+        if input_device:
+          self.uses_input = True
+          stream_parameters_in = ffi.new("PaStreamParameters*",
+                                         ( input_device['device_index'],
+                                           input_device['input_channels'],
+                                           _np2pa[input_device['sample_format']],
+                                           input_device['input_latency'],
+                                           ffi.NULL ))
+          self.input_format = input_device['sample_format']
+          self.input_channels = stream_parameters_in.channelCount
+          if stream_parameters_in and not input_device['interleaved_data']:
+              stream_parameters_in.sampleFormat |= 0x80000000
+            
+        self.uses_output = False
+        stream_parameters_out = None
+        # make sure behaviour is as specified in doc string: if no output_device is provided, don't create OutputParameters
+        if output_device:
+          self.uses_output = True
+          stream_parameters_out = ffi.new("PaStreamParameters*",
+                                          ( output_device['device_index'],
+                                            output_device['output_channels'],
+                                            _np2pa[output_device['sample_format']],
+                                            output_device['output_latency'],
+                                            ffi.NULL ))
+          self.output_format = output_device['sample_format']
+          self.output_channels = stream_parameters_out.channelCount
+          if stream_parameters_out and not output_device['interleaved_data']:
+              stream_parameters_out.sampleFormat |= 0x80000000
 
         stream_flags = 0
         if 'no_clipping' in flags:
@@ -383,13 +393,16 @@ class Stream(object):
         if callback:
             def callback_stub(input_ptr, output_ptr, num_frames, time_struct,
                       status_flags, user_data):
-                num_bytes = (self.input_channels * _npsizeof[self.input_format]
-                             * num_frames)
-                input_data = np.fromstring(ffi.buffer(input_ptr, num_bytes),
-                                           dtype=self.input_format,
-                                           count=num_frames*self.input_channels)
-                input_data = np.reshape(input_data,
-                                        (num_frames, self.input_channels))
+                # if there is no input device, skip reading input device data
+                input_data = None
+                if self.uses_input:
+                    num_bytes = (self.input_channels * _npsizeof[self.input_format]
+                                 * num_frames)
+                    input_data = np.fromstring(ffi.buffer(input_ptr, num_bytes),
+                                               dtype=self.input_format,
+                                               count=num_frames*self.input_channels)
+                    input_data = np.reshape(input_data,
+                                          (num_frames, self.input_channels))
                 time_info = {'input_adc_time': time_struct.inputBufferAdcTime,
                              'current_time': time_struct.currentTime,
                              'output_dac_time': time_struct.outputBufferDacTime}
@@ -397,11 +410,15 @@ class Stream(object):
                 output_data, flag = callback(input_data, num_frames,
                                              time_info, status_flags)
 
+		# only if an output device has been specified and output data is available, forward it
                 num_frames or len(output_data)
-                if output_data.dtype != self.output_format:
-                    output_data = np.array(output_data, dtype=self.output_format)
-                output_buffer = ffi.buffer(output_ptr, num_bytes)
-                output_buffer[:] = output_data.flatten().tostring()
+                if self.uses_output and len(output_data) > 0:
+                  num_bytes = (self.output_channels * _npsizeof[self.output_format]
+                                 * num_frames)
+                  if output_data.dtype != self.output_format:
+                      output_data = np.array(output_data, dtype=self.output_format)
+                  output_buffer = ffi.buffer(output_ptr, num_bytes)
+                  output_buffer[:] = output_data.flatten().tostring()
                 return flag
 
             self._callback = \
